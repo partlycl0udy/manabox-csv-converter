@@ -4,7 +4,7 @@ from tkinter import ttk, filedialog
 import webbrowser
 
 # Vendor data
-VENDORS = ["Card Kingdom", "TCGPlayer", "Card Conduit", "Star City Games"]
+VENDORS = ["Card Kingdom", "TCGPlayer **Conversion not completed", "Card Conduit **Conversion not completed", "Star City Games **Conversion not completed"]
 VENDOR_LINKS = {
     "Card Kingdom": "https://www.cardkingdom.com/static/csvImport",
     "TCGPlayer": "https://seller.tcgplayer.com/sell-with-us/marketplace",
@@ -13,7 +13,6 @@ VENDOR_LINKS = {
 }
 
 def convert_for_cardkingdom_row(row):
-    """Convert a single row for Card Kingdom."""
     title = str(row.get('Name', '')).split("//")[0].strip()
     edition = row.get('Set name', '')
     foil = 1 if str(row.get('Foil', '')).strip().lower() == 'foil' else 0
@@ -21,7 +20,7 @@ def convert_for_cardkingdom_row(row):
     return {'title': title, 'edition': edition, 'foil': foil, 'quantity': qty}
 
 def convert_placeholder_row(row, vendor_name):
-    return None  # Not implemented yet
+    return None
 
 class StyledButton(tk.Button):
     def __init__(self, master, text, bg="#7289DA", fg="#FFFFFF",
@@ -56,6 +55,7 @@ class ManaBoxConverterApp(tk.Tk):
         self.converted_data = []
         self.filter_values = {"title": "", "edition": "", "foil": "", "quantity": ""}
         self.sort_state = {"title": False, "edition": False, "foil": False, "quantity": False}
+        self.sorted_column = None
 
         self.create_widgets()
         self.create_progress_bar()
@@ -91,7 +91,7 @@ class ManaBoxConverterApp(tk.Tk):
         StyledButton(output_frame, text="Save As", bg="#7289DA", hover_bg="#99AAB5",
                      font=("Inter", 11, "bold"), command=self.browse_output).grid(row=0, column=1)
 
-        # Vendor frame (moved below output)
+        # Vendor frame
         vendor_frame = tk.LabelFrame(self, text="Vendor Selection", bg="#2C2F33", fg="#FFFFFF",
                                      font=self.font, padx=10, pady=10)
         vendor_frame.grid(row=3, column=0, padx=20, pady=5, sticky="ew")
@@ -137,10 +137,13 @@ class ManaBoxConverterApp(tk.Tk):
             self.preview_tree.heading(col, text=col.capitalize(), command=lambda c=col: self.sort_preview(c))
             self.preview_tree.column(col, width=150, anchor="center")
         self.preview_tree.grid(row=1, column=0, sticky="nsew")
-
         scroll_y = ttk.Scrollbar(preview_frame, orient="vertical", command=self.preview_tree.yview)
         self.preview_tree.configure(yscroll=scroll_y.set)
         scroll_y.grid(row=1, column=1, sticky="ns")
+
+        # Summary label
+        self.summary_label = tk.Label(preview_frame, text="Rows: 0 | Total Quantity: 0", bg="#2C2F33", fg="#FFFFFF", font=self.font)
+        self.summary_label.grid(row=2, column=0, sticky="w", pady=(5,0))
 
     def create_status_frame(self):
         self.status_frame = tk.Frame(self, bg="#23272A", relief="sunken", bd=2, height=30)
@@ -213,16 +216,20 @@ class ManaBoxConverterApp(tk.Tk):
 
             self.current_row += 1
             self.progress["value"] = (self.current_row / self.total_rows) * 100
+            self.update_summary()
             self.after(10, self.convert_next_row)
         else:
             self.update_status("Conversion complete!", "success")
             self.save_button.config(state="normal")
 
+    def update_summary(self):
+        total_qty = sum(int(row['quantity']) for row in self.converted_data)
+        self.summary_label.config(text=f"Rows: {len(self.converted_data)} | Total Quantity: {total_qty}")
+
     def save_converted_data(self):
         if not self.output_file.get():
             self.update_status("Please select an output file.", "warning")
             return
-
         try:
             pd.DataFrame(self.converted_data).to_csv(self.output_file.get(), index=False)
             self.update_status("✅ File saved successfully!", "success")
@@ -238,11 +245,20 @@ class ManaBoxConverterApp(tk.Tk):
         for row in self.converted_data:
             if all(str(row[col]).lower().find(self.filter_values[col]) != -1 or self.filter_values[col] == "" for col in self.filter_values):
                 self.preview_tree.insert("", "end", values=(row['title'], row['edition'], row['foil'], row['quantity']))
+        self.update_summary()
 
     def sort_preview(self, column):
         self.sort_state[column] = not self.sort_state[column]
         reverse = self.sort_state[column]
         self.converted_data.sort(key=lambda x: str(x[column]).lower(), reverse=reverse)
+
+        # Update headings with arrows
+        for col in ("title", "edition", "foil", "quantity"):
+            arrow = ""
+            if col == column:
+                arrow = "▲" if not reverse else "▼"
+            self.preview_tree.heading(col, text=f"{col.capitalize()} {arrow}", command=lambda c=col: self.sort_preview(c))
+
         self.refresh_preview()
 
 if __name__ == "__main__":
