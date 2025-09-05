@@ -4,12 +4,12 @@ from tkinter import ttk, filedialog
 import webbrowser
 
 # Vendor data
-VENDORS = ["Card Kingdom", "TCGPlayer", "CoolStuffInc", "ChannelFireball"]
+VENDORS = ["Card Kingdom", "TCGPlayer", "Card Conduit", "Star City Games"]
 VENDOR_LINKS = {
     "Card Kingdom": "https://www.cardkingdom.com/static/csvImport",
-    "TCGPlayer": "https://store.tcgplayer.com/buylist",
-    "CoolStuffInc": "https://www.coolstuffinc.com/main_buylist",
-    "ChannelFireball": "https://www.channel.com/buylist"  # Placeholder
+    "TCGPlayer": "https://seller.tcgplayer.com/sell-with-us/marketplace",
+    "Card Conduit": "https://cardconduit.com/estimates/create",
+    "Star City Games": "https://sellyourcards.starcitygames.com/mtg/upload"  
 }
 
 def convert_for_cardkingdom_row(row):
