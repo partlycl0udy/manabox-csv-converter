@@ -20,8 +20,8 @@ A desktop application built with **Python (Tkinter + Pandas)** to convert ManaBo
 ---
 
 ## 🖥️ Screenshot
-*(Add an actual screenshot here when available)*  
-Example UI layout: input/output selection, vendor dropdown, preview with filters, and progress bar.
+<img width="1102" height="782" alt="image" src="https://github.com/user-attachments/assets/7af77a50-6f9f-4506-8967-eeb5d3cd1fb9" />
+
 
 ---
 
