@@ -4,6 +4,9 @@ from tkinter import ttk, filedialog, Menu, messagebox
 import webbrowser
 from threading import Thread
 import time
+import requests
+from PIL import Image, ImageTk
+from io import BytesIO
 
 # --- Vendor data ---
 VENDORS = ["Card Kingdom", "TCGPlayer", "Card Conduit", "Star City Games"]
@@ -42,7 +45,7 @@ class StyledButton(tk.Button):
 class ManaBoxConverterApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("ManaBox CSV Converter V3")
+        self.title("ManaBox CSV Converter V4 - with Card Previews")
         self.configure(bg="#2C2F33")
 
         # --- Maximize window ---
@@ -56,6 +59,10 @@ class ManaBoxConverterApp(tk.Tk):
         self.sorted_column = None
         self.vendor = tk.StringVar(value="Card Kingdom")
         self.font = ("Inter", 12)
+        
+        # --- Image cache ---
+        self.image_cache = {}
+        self.current_image = None
 
         # --- Progress bar colors ---
         self.progress_colors = {
@@ -108,8 +115,8 @@ class ManaBoxConverterApp(tk.Tk):
 
         # Buttons frame
         button_frame = tk.Frame(self, bg="#2C2F33")
-        button_frame.pack(fill="x", pady=10)
-        StyledButton(button_frame, text="Select File", bg="#FFA500", hover_bg="#FFB84D",
+        button_frame.pack(fill="x", padx=20, pady=20)
+        StyledButton(button_frame, text="Select File", bg="#88FF00", hover_bg="#ACFF4D",
                      font=("Inter", 14, "bold"), command=self.open_file).pack(side="left", padx=10)
         StyledButton(button_frame, text="Convert & Preview", bg="#F04747", hover_bg="#FF6F61",
                      font=("Inter", 14, "bold"), command=self.start_conversion).pack(side="left", padx=10)
@@ -163,24 +170,318 @@ class ManaBoxConverterApp(tk.Tk):
             entry.bind("<KeyRelease>", lambda e, col=col, ent=entry: self.update_filter(col, ent.get()))
             self.filter_entries[col] = entry
 
-        # Treeview
-        self.preview_tree = ttk.Treeview(preview_frame, columns=("title", "edition", "foil", "quantity"), show="headings")
+        # Main content frame (treeview + image preview)
+        content_frame = tk.Frame(preview_frame, bg="#2C2F33")
+        content_frame.pack(fill="both", expand=True)
+
+        # Treeview frame
+        tree_frame = tk.Frame(content_frame, bg="#2C2F33")
+        tree_frame.pack(side="left", fill="both", expand=True)
+        
+        self.preview_tree = ttk.Treeview(tree_frame, columns=("title", "edition", "foil", "quantity"), show="headings")
         for col in ("title", "edition", "foil", "quantity"):
             self.preview_tree.heading(col, text=f"{col.capitalize()} ↑↓", command=lambda c=col: self.sort_preview(c))
             self.preview_tree.column(col, width=150, anchor="center")
         self.preview_tree.pack(fill="both", expand=True, side="left")
-        scroll_y = ttk.Scrollbar(preview_frame, orient="vertical", command=self.preview_tree.yview)
+        
+        scroll_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self.preview_tree.yview)
         self.preview_tree.configure(yscroll=scroll_y.set)
         scroll_y.pack(fill="y", side="right")
+        
+        # Bind selection event
+        self.preview_tree.bind("<<TreeviewSelect>>", self.on_card_select)
+
+        # Image preview frame
+        image_frame = tk.LabelFrame(content_frame, text="Card Preview", bg="#2C2F33", fg="#FFFFFF",
+                                   font=("Inter", 10, "bold"), width=300, height=400)
+        image_frame.pack(side="right", fill="y", padx=(10, 0))
+        image_frame.pack_propagate(False)
+        
+        self.image_label = tk.Label(image_frame, bg="#23272A", fg="#FFFFFF", 
+                                    text="Select a card to preview", font=("Inter", 10))
+        self.image_label.pack(fill="both", expand=True, padx=5, pady=5)
 
         # Summary label
         self.summary_label = tk.Label(self, text="Rows: 0 | Total Quantity: 0", bg="#2C2F33", fg="#FFFFFF", font=self.font)
         self.summary_label.pack(anchor="w", padx=25, pady=(0,10))
 
+    # --- Card Image Functions ---
+    def on_card_select(self, event):
+        selection = self.preview_tree.selection()
+        if not selection:
+            return
+        
+        item = self.preview_tree.item(selection[0])
+        values = item['values']
+        if not values:
+            return
+        
+        card_name = values[0]
+        set_name = values[1] if len(values) > 1 else ""
+        # Convert to int to handle both string and int values from treeview
+        is_foil = int(values[2]) if len(values) > 2 else 0
+        
+        # Show loading message
+        foil_text = " ✨ FOIL" if is_foil == 1 else ""
+        self.image_label.config(image='', text=f"Loading card image{foil_text}...", compound='center')
+        self.update_idletasks()
+        
+        # Fetch image in background thread
+        Thread(target=self.fetch_and_display_card, args=(card_name, set_name, is_foil), daemon=True).start()
+
+    def fetch_and_display_card(self, card_name, set_name, is_foil=0):
+        cache_key = f"{card_name}_{set_name}_{is_foil}"
+        
+        # Check cache first
+        if cache_key in self.image_cache:
+            self.display_image(self.image_cache[cache_key], is_foil)
+            return
+        
+        try:
+            # Strategy 1: Try with set name/code if provided
+            if set_name:
+                search_url = "https://api.scryfall.com/cards/named"
+                params = {"fuzzy": card_name, "set": set_name}
+                response = requests.get(search_url, params=params, timeout=5)
+                
+                if response.status_code == 200:
+                    card_data = response.json()
+                    image_url = self.extract_image_url(card_data, is_foil)
+                    if image_url:
+                        if self.download_and_cache_image(image_url, cache_key, is_foil):
+                            return
+            
+            # Strategy 2: Try without set (gets most recent printing)
+            search_url = "https://api.scryfall.com/cards/named"
+            params = {"fuzzy": card_name}
+            response = requests.get(search_url, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                card_data = response.json()
+                image_url = self.extract_image_url(card_data, is_foil)
+                if image_url:
+                    if self.download_and_cache_image(image_url, cache_key, is_foil):
+                        return
+            
+            # Strategy 3: Try general search API
+            search_url = "https://api.scryfall.com/cards/search"
+            params = {"q": f'!"{card_name}"', "unique": "prints", "order": "released"}
+            response = requests.get(search_url, params=params, timeout=5)
+            
+            if response.status_code == 200:
+                search_results = response.json()
+                if search_results.get('data'):
+                    # Get first result
+                    card_data = search_results['data'][0]
+                    image_url = self.extract_image_url(card_data, is_foil)
+                    if image_url:
+                        if self.download_and_cache_image(image_url, cache_key, is_foil):
+                            return
+            
+            # If we get here, nothing worked
+            foil_text = " (Foil)" if is_foil == 1 else ""
+            self.after(0, lambda: self.image_label.config(
+                image='', text=f"Card not found:\n{card_name}{foil_text}\n\nSet: {set_name or 'Any'}", compound='center'))
+                
+        except requests.Timeout:
+            self.after(0, lambda: self.image_label.config(
+                image='', text="Request timeout\nTry again", compound='center'))
+        except Exception as e:
+            self.after(0, lambda: self.image_label.config(
+                image='', text=f"Error loading image:\n{str(e)[:50]}", compound='center'))
+    
+    def extract_image_url(self, card_data, is_foil=0):
+        """Extract image URL from Scryfall card data, preferring foil if requested"""
+        image_uris = card_data.get('image_uris', {})
+        if not image_uris and 'card_faces' in card_data:
+            # Double-faced cards
+            image_uris = card_data['card_faces'][0].get('image_uris', {})
+        
+        # If foil is requested, try to get foil version first, then fall back to normal
+        if is_foil == 1:
+            foil_url = image_uris.get('normal') or image_uris.get('large') or image_uris.get('small')
+            # Check if this card has a foil treatment available
+            # Scryfall doesn't have separate foil/non-foil images in image_uris,
+            # but we can check if the card is available in foil
+            if card_data.get('finishes') and 'foil' in card_data.get('finishes', []):
+                return foil_url
+            # If no foil finish available, return normal anyway
+            return foil_url
+        
+        # Non-foil or fallback
+        return image_uris.get('normal') or image_uris.get('small') or image_uris.get('large')
+    
+    def download_and_cache_image(self, image_url, cache_key, is_foil=0):
+        """Download image and cache it. Returns True on success."""
+        try:
+            img_response = requests.get(image_url, timeout=5)
+            if img_response.status_code == 200:
+                img_data = Image.open(BytesIO(img_response.content))
+                self.image_cache[cache_key] = img_data
+                self.display_image(img_data, is_foil)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def display_image(self, pil_image, is_foil=0):
+        try:
+            # Resize to fit preview area (maintain aspect ratio)
+            target_width = 280
+            aspect_ratio = pil_image.height / pil_image.width
+            target_height = int(target_width * aspect_ratio)
+            
+            resized = pil_image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+            
+            # Apply foil effect if needed
+            if is_foil == 1:
+                resized = self.apply_foil_effect(resized)
+            
+            # Convert to PhotoImage
+            photo = ImageTk.PhotoImage(resized)
+            
+            # Display (need to keep reference to prevent garbage collection)
+            self.current_image = photo
+            self.after(0, lambda: self.image_label.config(image=photo, text='', compound='center'))
+        except Exception as e:
+            self.after(0, lambda: self.image_label.config(
+                image='', text=f"Display error:\n{str(e)[:50]}", compound='center'))
+    
+    def apply_foil_effect(self, image):
+        """Apply a holographic foil effect to the image"""
+        from PIL import ImageEnhance, ImageDraw, ImageFilter
+        import numpy as np
+        
+        print(f"Applying foil effect to image...")  # Debug output
+        
+        # Create a copy to work with
+        foil_img = image.copy().convert('RGBA')
+        width, height = foil_img.size
+        
+        # Create a smooth gradient overlay using numpy for better blending
+        overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        overlay_array = np.zeros((height, width, 4), dtype=np.uint8)
+        
+        # Create a smooth, organic gradient using Perlin-like noise
+        for y in range(height):
+            for x in range(width):
+                # Use multiple sine waves to create smooth, organic color shifts
+                # This avoids hard diagonal lines
+                wave1 = np.sin(x * 0.02 + y * 0.015)
+                wave2 = np.sin(x * 0.015 - y * 0.02)
+                wave3 = np.cos(x * 0.01 + y * 0.025)
+                
+                # Combine waves to get smooth position in color spectrum (0 to 1)
+                color_pos = ((wave1 + wave2 + wave3) / 3.0 + 1.0) / 2.0
+                
+                # Map to smooth rainbow spectrum using continuous HSV-like transformation
+                hue = color_pos * 360  # 0-360 degrees
+                
+                # Convert HSV-like hue to RGB for smooth rainbow
+                h = hue / 60.0
+                h_int = int(h) % 6
+                f = h - int(h)
+                
+                if h_int == 0:  # Red to Yellow
+                    r, g, b = 255, int(f * 255), 0
+                elif h_int == 1:  # Yellow to Green
+                    r, g, b = int((1 - f) * 255), 255, 0
+                elif h_int == 2:  # Green to Cyan
+                    r, g, b = 0, 255, int(f * 255)
+                elif h_int == 3:  # Cyan to Blue
+                    r, g, b = 0, int((1 - f) * 255), 255
+                elif h_int == 4:  # Blue to Magenta
+                    r, g, b = int(f * 255), 0, 255
+                else:  # Magenta to Red
+                    r, g, b = 255, 0, int((1 - f) * 255)
+                
+                # Add subtle shimmer variation
+                shimmer = abs(np.sin(x * 0.08 + y * 0.06)) * 0.2 + 0.8
+                
+                # Set pixel with moderate opacity
+                overlay_array[y, x] = [
+                    int(r * shimmer),
+                    int(g * shimmer),
+                    int(b * shimmer),
+                    40  # Overall opacity
+                ]
+        
+        # Convert array back to image
+        overlay = Image.fromarray(overlay_array, 'RGBA')
+        
+        # Apply stronger Gaussian blur for very smooth blending
+        overlay = overlay.filter(ImageFilter.GaussianBlur(radius=8))
+        
+        # Blend the overlay with the original image
+        foil_img = Image.alpha_composite(foil_img, overlay)
+        
+        # Add caustic effect
+        foil_img = self.add_caustic_effect(foil_img)
+        
+        # Increase saturation and brightness slightly for that "shiny" look
+        enhancer = ImageEnhance.Color(foil_img)
+        foil_img = enhancer.enhance(1.25)
+        
+        enhancer = ImageEnhance.Brightness(foil_img)
+        foil_img = enhancer.enhance(1.12)
+        
+        # Add slight contrast boost
+        enhancer = ImageEnhance.Contrast(foil_img)
+        foil_img = enhancer.enhance(1.1)
+        
+        print(f"Foil effect applied successfully!")  # Debug output
+        
+        return foil_img.convert('RGB')
+    
+    def add_caustic_effect(self, image):
+        """Add caustic light patterns like light through water"""
+        from PIL import ImageFilter
+        import numpy as np
+        
+        width, height = image.size
+        
+        # Create caustic pattern layer
+        caustic = Image.new('RGBA', (width, height), (0, 0, 0, 0))
+        caustic_array = np.zeros((height, width, 4), dtype=np.uint8)
+        
+        # Generate organic caustic patterns using multiple sine waves
+        for y in range(height):
+            for x in range(width):
+                # Multiple overlapping sine waves at different frequencies
+                wave1 = np.sin(x * 0.05 + y * 0.03) * 0.5 + 0.5
+                wave2 = np.sin(x * 0.08 - y * 0.06) * 0.5 + 0.5
+                wave3 = np.sin((x + y) * 0.04) * 0.5 + 0.5
+                wave4 = np.cos(x * 0.03 + y * 0.08) * 0.5 + 0.5
+                
+                # Combine waves with different weights
+                combined = (wave1 * 0.3 + wave2 * 0.3 + wave3 * 0.2 + wave4 * 0.2)
+                
+                # Create bright spots where waves align (caustic effect)
+                # Use power function to create sharper bright spots
+                intensity = pow(combined, 3) * 255
+                
+                # Only show bright caustics (threshold)
+                if intensity > 120:
+                    brightness = int(intensity)
+                    caustic_array[y, x] = [
+                        brightness,
+                        brightness,
+                        brightness,
+                        int((intensity - 120) * 0.8)  # Varying opacity for bright spots
+                    ]
+        
+        # Convert to image and blur for smoother caustics
+        caustic = Image.fromarray(caustic_array, 'RGBA')
+        caustic = caustic.filter(ImageFilter.GaussianBlur(radius=4))
+        
+        # Blend caustics onto the foil image
+        return Image.alpha_composite(image, caustic)
+
+
     # --- Status frame ---
     def create_status_frame(self):
         self.status_frame = tk.Frame(self, bg="#23272A", relief="sunken", bd=2, height=30)
-        self.status_frame.pack(fill="x", side="bottom")
+        self.status_frame.pack(fill="x", side="bottom", padx=10, pady=5)
         self.status_label = tk.Label(self.status_frame, text="Ready", bg="#23272A", fg="#FFFFFF",
                                      font=("Inter", 11), anchor="w")
         self.status_label.pack(fill="both", padx=10, pady=5)
@@ -255,6 +556,11 @@ class ManaBoxConverterApp(tk.Tk):
 
     # --- Filtering & Sorting ---
     def update_filter(self, col, value):
+        # Remove placeholder text before filtering
+        placeholder = f"Filter {col}"
+        if value == placeholder:
+            value = ""
+        
         self.filter_values[col] = value.lower()
         filtered = [row for row in self.converted_data
                     if all(str(row[c]).lower().find(self.filter_values[c]) != -1 for c in self.filter_values)]
